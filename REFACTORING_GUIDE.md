@@ -4,6 +4,8 @@
 
 The CSP Scanner has been refactored into a modular architecture with comprehensive test coverage. This guide explains the new structure and how to use it.
 
+**Note**: The refactoring has been completed and consolidated into the main `csp_scanner.py` file. The original versions have been archived in the `archive/` directory for reference.
+
 ## Module Structure
 
 ```
@@ -24,9 +26,12 @@ options/
 │   └── test_scoring.py
 ├── data_providers/           # Data provider interfaces (existing)
 ├── cache_providers/          # Cache provider interfaces (existing)
-├── csp_scanner_refactored.py # Refactored scanner using modules
+├── csp_scanner.py           # Main scanner (consolidated version)
 ├── pytest.ini               # Pytest configuration
-└── run_tests.py            # Test runner script
+├── run_tests.py            # Test runner script
+└── archive/                 # Historical versions
+    ├── csp_scanner_original.py
+    └── csp_scanner_refactored.py
 ```
 
 ## Key Changes
@@ -113,19 +118,25 @@ pytest tests/test_stock_filter.py
 pytest tests/test_stock_filter.py::TestStockFilter::test_get_quality_stocks_sp500
 ```
 
-## Using the Refactored Scanner
+## Using the Consolidated Scanner
 
-The refactored scanner (`csp_scanner_refactored.py`) works identically to the original:
+The consolidated scanner (`csp_scanner.py`) combines the modular architecture with all features from both versions:
 
 ```bash
 # Run with default settings
-python csp_scanner_refactored.py
+python csp_scanner.py
 
-# Run with custom parameters
-python csp_scanner_refactored.py --exchange NASDAQ --min-iv-rank 15 --support-buffer 0.03
+# Run with NASDAQ exchanges
+python csp_scanner.py --exchange NASDAQ --min-iv-rank 15 --support-buffer 0.03
+python csp_scanner.py --exchange NASDAQ_500  # Larger universe
+python csp_scanner.py --exchange NASDAQ_ALL --min-market-cap 5  # All NASDAQ > $5B
 
 # Run with specific stocks
-python csp_scanner_refactored.py --stocks AAPL,MSFT,GOOGL --debug
+python csp_scanner.py --stocks AAPL,MSFT,GOOGL --debug
+
+# Use caching for improved performance
+python csp_scanner.py --clear-cache  # Clear old cache first
+python csp_scanner.py  # Will use cache for subsequent runs
 ```
 
 ## Tuning the Scanner
