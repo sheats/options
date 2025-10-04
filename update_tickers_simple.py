@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
@@ -164,28 +165,32 @@ def fetch_ticker_data(ticker: str) -> Optional[Dict]:
             pass
             
         # Calculate IV rank proxy from volatility
-        try:
-            hist_1y = stock.history(period="1y")
-            if len(hist_1y) > 30:
-                returns = hist_1y["Close"].pct_change().dropna()
-                
-                # Rolling 30-day volatilities over the year
-                vol_series = returns.rolling(30).std() * (252 ** 0.5) * 100
-                vol_series = vol_series.dropna()
-                
-                if len(vol_series) > 0:
-                    current_vol = vol_series.iloc[-1]
-                    vol_min = vol_series.min()
-                    vol_max = vol_series.max()
-                    
-                    if vol_max > vol_min:
-                        iv_rank = ((current_vol - vol_min) / (vol_max - vol_min)) * 100
-                        data["iv_rank"] = min(100, max(0, iv_rank))
-                    else:
-                        data["iv_rank"] = 50.0
-        except Exception:
-            pass
+        hist_1y = stock.history(period="1y")
+        if len(hist_1y) > 30:
+            returns = hist_1y["Close"].pct_change().dropna()
             
+            # Rolling 30-day volatilities over the year
+            vol_series = returns.rolling(30).std() * (252 ** 0.5) * 100
+            vol_series = vol_series.dropna()
+            
+            if len(vol_series) > 0:
+                current_vol = float(vol_series.iloc[-1])
+                vol_min = float(vol_series.min())
+                vol_max = float(vol_series.max())
+                
+                if vol_max > vol_min:
+                    iv_rank = ((current_vol - vol_min) / (vol_max - vol_min)) * 100
+                    data["iv_rank"] = float(min(100, max(0, iv_rank)))
+                else:
+                    data["iv_rank"] = 50.0
+        
+        # Convert any remaining numpy types to Python types
+        for key, value in data.items():
+            if isinstance(value, (np.integer, np.int64)):
+                data[key] = int(value)
+            elif isinstance(value, (np.floating, np.float64)):
+                data[key] = float(value)
+        
         return data
         
     except Exception as e:
