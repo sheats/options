@@ -104,8 +104,23 @@ class StockFilter:
                 
                 logger.debug(f"Checking quality metrics for {ticker}")
                 
-                # Get stock info from data provider
-                info = self.data_provider.get_stock_info(ticker)
+                # Try to get comprehensive data from cache first
+                info = None
+                if self.cache_provider:
+                    ticker_data = self.cache_provider.get_ticker_data(ticker)
+                    if ticker_data:
+                        # Map cached data to expected format
+                        info = {
+                            "marketCap": ticker_data.get("market_cap", 0),
+                            "trailingPE": ticker_data.get("trailing_pe", float("inf")),
+                            "forwardEps": ticker_data.get("forward_eps", 0),
+                            "oneYrReturn": ticker_data.get("return_1y", -100)
+                        }
+                        logger.debug(f"Using cached ticker data for {ticker}")
+                
+                # If not in cache, get from data provider
+                if not info:
+                    info = self.data_provider.get_stock_info(ticker)
                 
                 # Extract metrics
                 market_cap = info.get("marketCap", 0)

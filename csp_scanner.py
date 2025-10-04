@@ -114,17 +114,30 @@ class CSPScanner:
         try:
             logger.info(f"Scanning {ticker}...")
 
-            # Get current price
-            hist = self.data_provider.get_historical_data(ticker, period="5d")
-            if hist.empty:
-                logger.warning(f"{ticker}: No price data available")
-                return opportunities
+            # Try to get current price and IV rank from cached ticker data first
+            current_price = None
+            iv_rank = None
+            
+            if self.cache_provider:
+                ticker_data = self.cache_provider.get_ticker_data(ticker)
+                if ticker_data:
+                    current_price = ticker_data.get('current_price')
+                    iv_rank = ticker_data.get('iv_rank')
+                    if current_price and iv_rank is not None:
+                        logger.debug(f"Using cached data for {ticker}: price=${current_price:.2f}, IV rank={iv_rank:.1f}%")
+            
+            # Get current price from data provider if not in cache
+            if current_price is None:
+                hist = self.data_provider.get_historical_data(ticker, period="5d")
+                if hist.empty:
+                    logger.warning(f"{ticker}: No price data available")
+                    return opportunities
+                current_price = hist["Close"].iloc[-1]
+                logger.debug(f"{ticker} current price: ${current_price:.2f}")
 
-            current_price = hist["Close"].iloc[-1]
-            logger.debug(f"{ticker} current price: ${current_price:.2f}")
-
-            # Get IV rank
-            iv_rank = self.data_provider.get_iv_rank(ticker)
+            # Get IV rank from data provider if not in cache
+            if iv_rank is None:
+                iv_rank = self.data_provider.get_iv_rank(ticker)
             logger.debug(f"{ticker} IV rank: {iv_rank:.1f}%")
 
             if iv_rank < self.min_iv_rank:

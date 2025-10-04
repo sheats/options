@@ -54,6 +54,29 @@ class SQLiteCacheProvider(CacheProvider):
                     ON quality_stocks(exchange, last_updated)
                 """)
                 
+                # Create comprehensive ticker data table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ticker_data (
+                        ticker TEXT,
+                        exchange TEXT,
+                        data TEXT,  -- JSON blob containing all data
+                        last_updated TIMESTAMP,
+                        PRIMARY KEY (ticker, exchange)
+                    )
+                """)
+                
+                # Create index for ticker data
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ticker_data_lookup
+                    ON ticker_data(exchange, last_updated)
+                """)
+                
+                # Create index for ticker lookup
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ticker_data_ticker
+                    ON ticker_data(ticker)
+                """)
+                
                 conn.commit()
                 logger.debug(f"Cache database initialized: {self.db_path}")
                 
@@ -212,4 +235,176 @@ class SQLiteCacheProvider(CacheProvider):
                 
         except Exception as e:
             logger.debug(f"Could not get cache stats: {str(e)}")
+            return None
+    
+    def save_ticker_data(self, ticker: str, exchange: str, data: Dict) -> None:
+        """
+        Save comprehensive ticker data to cache
+        
+        Args:
+            ticker: Stock ticker symbol
+            exchange: Exchange name
+            data: Dictionary containing all ticker data
+        """
+        try:
+            import json
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT OR REPLACE INTO ticker_data
+                    (ticker, exchange, data, last_updated)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    ticker,
+                    exchange,
+                    json.dumps(data),
+                    datetime.datetime.now()
+                ))
+                
+                conn.commit()
+                logger.debug(f"Saved ticker data for {ticker} ({exchange})")
+                
+        except Exception as e:
+            logger.error(f"Error saving ticker data: {str(e)}")
+    
+    def get_ticker_data(self, ticker: str, max_age_hours: Optional[int] = None) -> Optional[Dict]:
+        """
+        Get cached ticker data
+        
+        Args:
+            ticker: Stock ticker symbol
+            max_age_hours: Maximum age in hours (uses default if None)
+            
+        Returns:
+            Dictionary with ticker data or None if not found/expired
+        """
+        try:
+            import json
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get latest data for ticker
+                cursor.execute("""
+                    SELECT data, last_updated
+                    FROM ticker_data
+                    WHERE ticker = ?
+                    ORDER BY last_updated DESC
+                    LIMIT 1
+                """, (ticker,))
+                
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                
+                data_json, last_updated = row
+                last_updated_dt = datetime.datetime.fromisoformat(last_updated)
+                
+                # Check age
+                max_age = max_age_hours if max_age_hours else self.cache_lifetime_hours
+                if not self.is_cache_valid(last_updated_dt, max_age):
+                    logger.debug(f"Ticker data for {ticker} is expired")
+                    return None
+                
+                return json.loads(data_json)
+                
+        except Exception as e:
+            logger.error(f"Error reading ticker data: {str(e)}")
+            return None
+    
+    def get_cached_tickers(self, exchange: Optional[str] = None) -> List[str]:
+        """
+        Get list of cached tickers
+        
+        Args:
+            exchange: Filter by exchange (optional)
+            
+        Returns:
+            List of ticker symbols
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                if exchange:
+                    cursor.execute("""
+                        SELECT DISTINCT ticker
+                        FROM ticker_data
+                        WHERE exchange = ?
+                        ORDER BY ticker
+                    """, (exchange,))
+                else:
+                    cursor.execute("""
+                        SELECT DISTINCT ticker
+                        FROM ticker_data
+                        ORDER BY ticker
+                    """)
+                
+                rows = cursor.fetchall()
+                return [row[0] for row in rows]
+                
+        except Exception as e:
+            logger.error(f"Error getting cached tickers: {str(e)}")
+            return []
+    
+    def clear_ticker_data(self, exchange: Optional[str] = None) -> None:
+        """
+        Clear ticker data cache
+        
+        Args:
+            exchange: Clear only specific exchange (optional)
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                if exchange:
+                    cursor.execute("DELETE FROM ticker_data WHERE exchange = ?", (exchange,))
+                    logger.info(f"Cleared ticker data for {exchange}")
+                else:
+                    cursor.execute("DELETE FROM ticker_data")
+                    logger.info("Cleared all ticker data")
+                
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"Error clearing ticker data: {str(e)}")
+    
+    def get_ticker_cache_stats(self) -> Optional[Dict]:
+        """Get statistics for ticker data cache"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get ticker data statistics
+                cursor.execute("""
+                    SELECT exchange, COUNT(*) as count,
+                           MIN(last_updated) as oldest,
+                           MAX(last_updated) as newest
+                    FROM ticker_data
+                    GROUP BY exchange
+                """)
+                
+                rows = cursor.fetchall()
+                if not rows:
+                    return None
+                
+                stats = {}
+                for row in rows:
+                    exchange, count, oldest, newest = row
+                    oldest_dt = datetime.datetime.fromisoformat(oldest)
+                    newest_dt = datetime.datetime.fromisoformat(newest)
+                    
+                    stats[exchange] = {
+                        'ticker_count': count,
+                        'oldest_hours': (datetime.datetime.now() - oldest_dt).total_seconds() / 3600,
+                        'newest_hours': (datetime.datetime.now() - newest_dt).total_seconds() / 3600,
+                    }
+                
+                return stats
+                
+        except Exception as e:
+            logger.debug(f"Could not get ticker cache stats: {str(e)}")
             return None

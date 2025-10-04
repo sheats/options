@@ -70,3 +70,52 @@ class CacheProvider(ABC):
             True if cache is still valid, False otherwise
         """
         pass
+    
+    @abstractmethod
+    def save_ticker_data(self, ticker: str, exchange: str, data: Dict) -> None:
+        """
+        Save comprehensive ticker data to cache
+        
+        Args:
+            ticker: Stock ticker symbol
+            exchange: Exchange name
+            data: Dictionary containing all ticker data
+        """
+        pass
+    
+    @abstractmethod
+    def get_ticker_data(self, ticker: str, max_age_hours: Optional[int] = None) -> Optional[Dict]:
+        """
+        Get cached ticker data
+        
+        Args:
+            ticker: Stock ticker symbol
+            max_age_hours: Maximum age in hours (uses default if None)
+            
+        Returns:
+            Dictionary with ticker data or None if not found/expired
+        """
+        pass
+    
+    @abstractmethod
+    def get_cached_tickers(self, exchange: Optional[str] = None) -> List[str]:
+        """
+        Get list of cached tickers
+        
+        Args:
+            exchange: Filter by exchange (optional)
+            
+        Returns:
+            List of ticker symbols
+        """
+        pass
+    
+    @abstractmethod
+    def clear_ticker_data(self, exchange: Optional[str] = None) -> None:
+        """
+        Clear ticker data cache
+        
+        Args:
+            exchange: Clear only specific exchange (optional)
+        """
+        pass
