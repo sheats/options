@@ -7,3 +7,6 @@ pandas-ta>=0.3.14b0
 
 # Optional: For TastyTrade data provider
 # tastytrade>=6.0
+
+# Debugging
+ipdb

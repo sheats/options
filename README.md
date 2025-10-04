@@ -2,6 +2,23 @@
 
 A sophisticated Python tool for identifying optimal cash-secured put opportunities with minimal loss potential, designed for quantitative options income strategies.
 
+## Project Structure
+
+```
+options/
+├── csp_scanner.py           # Main scanner script
+├── data_providers/          # Data provider abstraction
+│   ├── __init__.py
+│   ├── base.py             # Abstract base class
+│   ├── yfinance_provider.py    # Yahoo Finance implementation
+│   └── tastytrade_provider.py  # TastyTrade implementation (optional)
+├── example.py              # Simple usage examples
+├── backtest_csp.py         # Backtesting tool
+├── requirements.txt        # Python dependencies
+├── .flake8                # Code style configuration
+└── archive/               # Old versions (for reference)
+```
+
 ## Features
 
 - **Quality Stock Filtering**: Screens for large-cap stocks with strong fundamentals (market cap >$50B, P/E <30, positive YoY returns)
