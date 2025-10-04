@@ -1,0 +1,31 @@
+{
+  "scanner_settings": {
+    "max_weeks": 8,
+    "min_iv_rank": 50.0,
+    "min_market_cap": 50000000000,
+    "max_pe_ratio": 30,
+    "min_yearly_return": 0,
+    "delta_range": [-0.30, -0.15],
+    "min_volume": 100,
+    "min_open_interest": 50,
+    "min_daily_premium": 0.05,
+    "min_annualized_roc": 10.0,
+    "support_buffer": 0.95
+  },
+  "position_sizing": {
+    "max_position_pct": 0.05,
+    "max_sector_exposure": 0.25,
+    "max_single_stock_contracts": 10
+  },
+  "risk_management": {
+    "profit_target_pct": 50,
+    "stop_loss_pct": 200,
+    "days_to_roll": 21,
+    "avoid_earnings": true
+  },
+  "technical_analysis": {
+    "sma_period": 200,
+    "local_minima_order": 20,
+    "kmeans_clusters": 3
+  }
+}
