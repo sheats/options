@@ -16,6 +16,7 @@ Features:
 import argparse
 import datetime
 import json
+import sqlite3
 import logging
 import os
 import signal
@@ -95,7 +96,7 @@ class TickerDataFetcher:
 
     def fetch_comprehensive_data(self, ticker: str) -> Optional[Dict]:
         """
-        Fetch comprehensive data for a single ticker
+        Fetch comprehensive data for a single ticker with CSP hotlist criteria
 
         Returns:
             Dictionary with all ticker data or None if failed
@@ -103,6 +104,10 @@ class TickerDataFetcher:
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
+            
+            # Get all available data - no filtering
+            market_cap = info.get("marketCap", 0)
+            forward_eps = info.get("forwardEps", 0)
 
             # Basic info
             data = {
@@ -112,7 +117,7 @@ class TickerDataFetcher:
                 "company_name": info.get("longName", info.get("shortName", "")),
                 "sector": info.get("sector", ""),
                 "industry": info.get("industry", ""),
-                "market_cap": info.get("marketCap", 0),
+                "market_cap": market_cap,
                 "enterprise_value": info.get("enterpriseValue", 0),
                 "employees": info.get("fullTimeEmployees", 0),
                 "website": info.get("website", ""),
@@ -137,6 +142,11 @@ class TickerDataFetcher:
                 "avg_volume_10d": info.get("averageVolume10days", 0),
                 "shares_outstanding": info.get("sharesOutstanding", 0),
                 "float_shares": info.get("floatShares", 0),
+                # CSP-critical ownership and quality metrics
+                "institutional_ownership": info.get("heldPercentInstitutions", 0),
+                "insider_ownership": info.get("heldPercentInsiders", 0),
+                "short_ratio": info.get("shortRatio", 0),
+                "shares_short": info.get("sharesShort", 0),
                 # Valuation metrics
                 "trailing_pe": info.get("trailingPE", None),
                 "forward_pe": info.get("forwardPE", None),
@@ -145,16 +155,20 @@ class TickerDataFetcher:
                 "price_to_book": info.get("priceToBook", None),
                 "enterprise_to_revenue": info.get("enterpriseToRevenue", None),
                 "enterprise_to_ebitda": info.get("enterpriseToEbitda", None),
-                # Earnings & Dividends
+                # Earnings & Growth (CSP critical)
                 "trailing_eps": info.get("trailingEps", 0),
-                "forward_eps": info.get("forwardEps", 0),
+                "forward_eps": forward_eps,
                 "earnings_quarterly_growth": info.get("earningsQuarterlyGrowth", None),
+                "earnings_growth": info.get("earningsGrowth", None),  # Annual EPS growth
                 "revenue_quarterly_growth": info.get("revenueQuarterlyGrowth", None),
+                "revenue_growth": info.get("revenueGrowth", None),  # Annual revenue growth
+                # Dividends (CSP filter: yield > 1%)
                 "dividend_rate": info.get("dividendRate", 0),
                 "dividend_yield": info.get("dividendYield", 0),
                 "ex_dividend_date": info.get("exDividendDate", None),
                 "payout_ratio": info.get("payoutRatio", 0),
-                # Financial metrics
+                "five_year_avg_dividend_yield": info.get("fiveYearAvgDividendYield", 0),
+                # Financial metrics (CSP critical: debt/equity < 1)
                 "profit_margin": info.get("profitMargins", None),
                 "operating_margin": info.get("operatingMargins", None),
                 "gross_margin": info.get("grossMargins", None),
@@ -171,10 +185,12 @@ class TickerDataFetcher:
                 "quick_ratio": info.get("quickRatio", None),
                 "return_on_assets": info.get("returnOnAssets", None),
                 "return_on_equity": info.get("returnOnEquity", None),
-                # Risk metrics
+                "free_cash_flow": info.get("freeCashflow", 0),
+                "operating_cash_flow": info.get("operatingCashflow", 0),
+                # Risk metrics (CSP filter: beta < 1.2)
                 "beta": info.get("beta", None),
                 "beta_3y": info.get("beta3Year", None),
-                # Analyst data
+                # Analyst data (CSP filter: recommendation < 2.5)
                 "target_high": info.get("targetHighPrice", None),
                 "target_low": info.get("targetLowPrice", None),
                 "target_mean": info.get("targetMeanPrice", None),
@@ -206,8 +222,24 @@ class TickerDataFetcher:
             else:
                 data["next_earnings_date"] = None
 
-            # Get IV rank (using historical volatility as proxy)
-            data["iv_rank"] = self.yf_provider.get_iv_rank(ticker)
+            # Get IV rank (critical for CSP hotlist)
+            # Try to get from OpenBB or other sources if available, else use proxy
+            iv_rank = self.yf_provider.get_iv_rank(ticker)
+            data["iv_rank"] = iv_rank
+            
+            # Also store IV rank proxy for comparison
+            if data.get("volatility_30d") and data.get("volatility_1y"):
+                # Simple proxy: current 30d vol percentile vs 1y range
+                vol_min = min(data.get("volatility_10d", 100), data.get("volatility_30d", 100), 
+                             data.get("volatility_60d", 100), data.get("volatility_90d", 100))
+                vol_max = data.get("volatility_1y", 0)
+                if vol_max > vol_min:
+                    iv_rank_proxy = ((data["volatility_30d"] - vol_min) / (vol_max - vol_min)) * 100
+                    data["iv_rank_proxy"] = min(100, max(0, iv_rank_proxy))
+                else:
+                    data["iv_rank_proxy"] = 50.0  # Default if no range
+            else:
+                data["iv_rank_proxy"] = iv_rank  # Use same as iv_rank if no vol data
 
             # Get options data
             options_data = self._get_options_summary(ticker)
@@ -471,6 +503,190 @@ class TickerDataFetcher:
 
         return None
 
+    def generate_hotlist(self, exchange: str, min_iv_rank: float = 50.0) -> pd.DataFrame:
+        """
+        Generate CSP hotlist from cached data based on strict criteria
+        """
+        logger.info(f"\nGenerating CSP hotlist for {exchange}...")
+        
+        # Get all cached tickers for exchange
+        cached_tickers = self.cache_provider.get_cached_tickers(exchange)
+        if not cached_tickers:
+            logger.warning("No cached tickers found. Run update first.")
+            return pd.DataFrame()
+        
+        hotlist_candidates = []
+        
+        for ticker in cached_tickers:
+            try:
+                # Get cached data
+                data = self.cache_provider.get_ticker_data(ticker)
+                if not data:
+                    continue
+                
+                # Apply CSP hotlist filters
+                market_cap = data.get("market_cap", 0)
+                institutional_ownership = data.get("institutional_ownership", 0)
+                debt_to_equity = data.get("debt_to_equity", float('inf'))
+                earnings_growth = data.get("earnings_growth", 0)
+                recommendation_mean = data.get("recommendation_mean", 5)
+                beta = data.get("beta", 2.0)
+                dividend_yield = data.get("dividend_yield", 0)
+                rsi_14 = data.get("rsi_14", 100)
+                macd = data.get("macd", -1)
+                iv_rank = data.get("iv_rank", 0)
+                iv_rank_proxy = data.get("iv_rank_proxy", 0)
+                return_1y = data.get("return_1y", -100)
+                
+                # Apply filters only if we have the data
+                if market_cap and market_cap < 50e9:  # $50B minimum
+                    logger.debug(f"Skipping {ticker}: Market cap < $50B")
+                    continue
+                    
+                if (iv_rank or iv_rank_proxy) and max(iv_rank, iv_rank_proxy) < min_iv_rank:
+                    logger.debug(f"Skipping {ticker}: IV rank {max(iv_rank, iv_rank_proxy):.1f}% < {min_iv_rank}%")
+                    continue
+                    
+                if institutional_ownership and institutional_ownership < 0.5:  # 50% minimum
+                    logger.debug(f"Skipping {ticker}: Institutional ownership {institutional_ownership:.1%} < 50%")
+                    continue
+                    
+                if debt_to_equity is not None and debt_to_equity >= 1.0:  # Less than 1.0 required
+                    logger.debug(f"Skipping {ticker}: Debt/Equity {debt_to_equity:.2f} >= 1.0")
+                    continue
+                    
+                if earnings_growth and earnings_growth < 0.05:  # 5% minimum
+                    logger.debug(f"Skipping {ticker}: EPS growth {earnings_growth:.1%} < 5%")
+                    continue
+                    
+                if recommendation_mean and recommendation_mean > 2.5:  # Buy rating required
+                    logger.debug(f"Skipping {ticker}: Analyst rating {recommendation_mean:.1f} > 2.5")
+                    continue
+                    
+                if beta is not None and beta >= 1.2:  # Stability required
+                    logger.debug(f"Skipping {ticker}: Beta {beta:.2f} >= 1.2")
+                    continue
+                    
+                if dividend_yield is not None and dividend_yield < 0.01:  # 1% minimum
+                    logger.debug(f"Skipping {ticker}: Dividend yield {dividend_yield:.1%} < 1%")
+                    continue
+                
+                # Calculate hotlist score
+                # Higher IV rank, lower beta, higher institutional ownership, oversold RSI = higher score
+                effective_iv_rank = max(iv_rank, iv_rank_proxy)
+                rsi_factor = 1.0 if rsi_14 < 50 else 0.5  # Bonus for oversold
+                momentum_factor = 1.2 if macd > 0 else 1.0  # Bonus for positive momentum
+                
+                score = (
+                    effective_iv_rank * 
+                    (2.0 - beta) *  # Lower beta = higher multiplier
+                    institutional_ownership * 
+                    rsi_factor *
+                    momentum_factor
+                )
+                
+                hotlist_candidates.append({
+                    "ticker": ticker,
+                    "score": score,
+                    "company_name": data.get("company_name", ""),
+                    "sector": data.get("sector", ""),
+                    "market_cap_b": market_cap / 1e9,
+                    "iv_rank": effective_iv_rank,
+                    "beta": beta,
+                    "institutional_ownership": institutional_ownership,
+                    "debt_to_equity": debt_to_equity,
+                    "earnings_growth": earnings_growth,
+                    "dividend_yield": dividend_yield,
+                    "recommendation_mean": recommendation_mean,
+                    "rsi_14": rsi_14,
+                    "macd": macd,
+                    "return_1y": return_1y,
+                    "current_price": data.get("current_price", 0),
+                    "next_earnings_date": data.get("next_earnings_date", ""),
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing {ticker} for hotlist: {str(e)}")
+        
+        if not hotlist_candidates:
+            logger.warning("No stocks matched hotlist criteria. Consider relaxing filters.")
+            return pd.DataFrame()
+        
+        # Create DataFrame and sort by score
+        hotlist_df = pd.DataFrame(hotlist_candidates)
+        hotlist_df = hotlist_df.sort_values("score", ascending=False).head(50)  # Top 50
+        
+        # Save to cache
+        self._save_hotlist_to_cache(hotlist_df, exchange)
+        
+        # Export to CSV
+        csv_filename = f"hotlist_{exchange}_{datetime.date.today()}.csv"
+        hotlist_df.to_csv(csv_filename, index=False)
+        logger.info(f"Exported hotlist to {csv_filename}")
+        
+        logger.info(f"Generated hotlist with {len(hotlist_df)} stocks")
+        
+        return hotlist_df
+    
+    def _save_hotlist_to_cache(self, hotlist_df: pd.DataFrame, exchange: str):
+        """Save hotlist to cache database"""
+        try:
+            # Access the database directly since cache provider doesn't expose connection
+            import sqlite3
+            with sqlite3.connect(self.cache_provider.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Create hotlist table if not exists
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS hotlist (
+                        ticker TEXT,
+                        exchange TEXT,
+                        score REAL,
+                        iv_rank REAL,
+                        beta REAL,
+                        rsi_14 REAL,
+                        institutional_ownership REAL,
+                        debt_to_equity REAL,
+                        earnings_growth REAL,
+                        dividend_yield REAL,
+                        recommendation_mean REAL,
+                        market_cap_b REAL,
+                        data TEXT,
+                        last_updated TIMESTAMP,
+                        PRIMARY KEY (ticker, exchange)
+                    )
+                """)
+                
+                # Clear existing hotlist for this exchange
+                cursor.execute("DELETE FROM hotlist WHERE exchange = ?", (exchange,))
+                
+                # Insert new hotlist
+                for _, row in hotlist_df.iterrows():
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO hotlist VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        row["ticker"],
+                        exchange,
+                        row["score"],
+                        row["iv_rank"],
+                        row["beta"],
+                        row["rsi_14"],
+                        row["institutional_ownership"],
+                        row["debt_to_equity"],
+                        row.get("earnings_growth", 0),
+                        row["dividend_yield"],
+                        row["recommendation_mean"],
+                        row["market_cap_b"],
+                        json.dumps(row.to_dict()),
+                        datetime.datetime.now()
+                    ))
+                
+                conn.commit()
+                logger.info(f"Saved {len(hotlist_df)} stocks to hotlist cache")
+            
+        except Exception as e:
+            logger.error(f"Error saving hotlist to cache: {str(e)}")
+    
     def update_tickers(
         self, tickers: List[str], exchange: str, resume: bool = True
     ) -> Dict[str, int]:
@@ -569,9 +785,7 @@ class TickerDataFetcher:
         return stats
 
 
-def get_exchange_tickers(
-    exchange: str, min_market_cap: Optional[float] = None
-) -> List[str]:
+def get_exchange_tickers(exchange: str) -> List[str]:
     """Get list of tickers for specified exchange"""
     if exchange == "SP500":
         # Fetch S&P 500 from Wikipedia
@@ -598,10 +812,8 @@ def get_exchange_tickers(
             stocks = fetcher.get_nasdaq_500(include_info=False)
             return [s["symbol"] for s in stocks]
         else:  # NASDAQ_ALL
-            # All NASDAQ stocks with optional market cap filter
-            stocks = fetcher.get_all_nasdaq_stocks(
-                min_market_cap=min_market_cap, include_info=False
-            )
+            # All NASDAQ stocks
+            stocks = fetcher.get_all_nasdaq_stocks(include_info=False)
             return [s["symbol"] for s in stocks]
 
     else:
@@ -620,11 +832,6 @@ def main():
         default="SP500",
         choices=["SP500", "NASDAQ", "NASDAQ_500", "NASDAQ_ALL"],
         help="Stock exchange to update (default: SP500)",
-    )
-    parser.add_argument(
-        "--min-market-cap",
-        type=float,
-        help="Minimum market cap in billions (e.g., 1 for $1B)",
     )
     parser.add_argument(
         "--cache-db",
@@ -654,6 +861,22 @@ def main():
         default=0.1,
         help="Rate limit delay between requests in seconds (default: 0.1)",
     )
+    parser.add_argument(
+        "--hotlist-only",
+        action="store_true",
+        help="Skip ticker update and only generate hotlist from cache",
+    )
+    parser.add_argument(
+        "--min-iv-rank",
+        type=float,
+        default=50.0,
+        help="Minimum IV rank for hotlist (default: 50.0)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress non-error output (for cron jobs)",
+    )
 
     args = parser.parse_args()
 
@@ -664,25 +887,39 @@ def main():
         logger.info("Clearing existing cache...")
         cache_provider.clear_ticker_data()
 
-    # Convert market cap to actual value
-    min_market_cap = args.min_market_cap * 1e9 if args.min_market_cap else None
 
-    # Get tickers
-    logger.info(f"Fetching {args.exchange} tickers...")
-    tickers = get_exchange_tickers(args.exchange, min_market_cap)
-
-    if not tickers:
-        logger.error("No tickers found")
-        return 1
-
-    logger.info(f"Found {len(tickers)} tickers to process")
-
+    # Configure logging for quiet mode
+    if args.quiet:
+        logging.getLogger().setLevel(logging.ERROR)
+    
     # Initialize fetcher
     fetcher = TickerDataFetcher(
         cache_provider=cache_provider,
         max_workers=args.workers,
         rate_limit_delay=args.rate_limit,
     )
+    
+    # If hotlist-only mode, skip ticker update
+    if args.hotlist_only:
+        logger.info("Hotlist-only mode: Generating hotlist from cache")
+        hotlist = fetcher.generate_hotlist(args.exchange, args.min_iv_rank)
+        if not hotlist.empty:
+            print(f"\n{'='*80}")
+            print(f"CSP Hotlist for {args.exchange} (Top 10)")
+            print(f"{'='*80}")
+            print(hotlist[['ticker', 'score', 'iv_rank', 'beta', 'rsi_14', 'institutional_ownership', 'dividend_yield']].head(10).to_string(index=False))
+            print(f"\nFull hotlist saved to: hotlist_{args.exchange}_{datetime.date.today()}.csv")
+        return 0
+    
+    # Get tickers
+    logger.info(f"Fetching {args.exchange} tickers...")
+    tickers = get_exchange_tickers(args.exchange)
+
+    if not tickers:
+        logger.error("No tickers found")
+        return 1
+
+    logger.info(f"Found {len(tickers)} tickers to process")
 
     # Run update
     stats = fetcher.update_tickers(
@@ -704,6 +941,24 @@ def main():
     if SHUTDOWN_REQUESTED:
         logger.info("\nUpdate interrupted by user")
         return 2
+    
+    # Generate hotlist after update
+    if stats['processed'] > 0:
+        logger.info("\nGenerating CSP hotlist...")
+        hotlist = fetcher.generate_hotlist(args.exchange, args.min_iv_rank)
+        
+        if not hotlist.empty:
+            # Display sample results
+            print(f"\n{'='*100}")
+            print(f"CSP Hotlist for {args.exchange} - Top Stocks for Cash-Secured Puts")
+            print(f"{'='*100}")
+            print("\nSample (Top 3):")
+            for idx, row in hotlist.head(3).iterrows():
+                print(f"\n{row['ticker']}: Score={row['score']:.1f}, IV_rank={row['iv_rank']:.1f}%, Beta={row['beta']:.2f}")
+                print(f"  Inst. Own: {row['institutional_ownership']:.1%}, D/E: {row['debt_to_equity']:.2f}, RSI: {row['rsi_14']:.1f}")
+                print(f"  Div Yield: {row['dividend_yield']:.1%}, 1Y Return: {row['return_1y']:.1f}%, Price: ${row['current_price']:.2f}")
+            
+            print(f"\nFull hotlist with {len(hotlist)} stocks saved to: hotlist_{args.exchange}_{datetime.date.today()}.csv")
 
     return 0
 
